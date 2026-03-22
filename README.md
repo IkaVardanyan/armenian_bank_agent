@@ -1,132 +1,84 @@
-# Armenian Bank Voice AI Support Agent
+# Armenian Bank Voice Agent — Aram (Արամ)
 
-> An end-to-end Voice AI customer support agent for Armenian banks, built using the **open-source LiveKit Agents framework**. The agent understands and speaks Armenian, answering questions exclusively about Credits, Deposits, and Branch Locations using data scraped directly from official Armenian bank websites.
+An end-to-end Voice AI customer support agent for Armenian banks, built with the open-source **LiveKit framework** and **OpenAI** models. The agent speaks and understands Armenian and answers questions about loans, deposits, and branch locations for Amio Bank, Ameria Bank, and Fast Bank.
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Architecture & Design Decisions](#architecture--design-decisions)
-- [Tech Stack & Model Choices](#tech-stack--model-choices)
-- [Data Strategy](#data-strategy)
-- [Project Structure](#project-structure)
-- [Setup Instructions](#setup-instructions)
-- [Running the Agent](#running-the-agent)
-- [Testing](#testing)
-- [Scalability](#scalability)
 
----
-
-## Overview
-
-**Agent name:** Արամ (Aram)  
-**Language:** Armenian (հայերեն)  
-**Scope:** Credits, Deposits, Branch Locations only  
-**Banks covered:** Amio Bank, Ameriabank, Fast Bank  
-**Framework:** LiveKit Agents (open-source)
+1. [Architecture & Design Decisions](#architecture--design-decisions)
+2. [Project Structure](#project-structure)
+3. [Setup Instructions](#setup-instructions)
+4. [How to Run](#how-to-run)
+5. [How to Use](#how-to-use)
 
 ---
 
 ## Architecture & Design Decisions
 
-The system follows a real-time voice pipeline:
+### High-Level Pipeline
+
+Every time the user speaks, the following pipeline runs:
 
 ```
-User Speech
+User Voice
     │
     ▼
-VAD (Silero) ── detects speech boundaries
+VAD (Silero)              ← detects when user starts/stops speaking
     │
     ▼
-STT (Whisper-1) ── transcribes Armenian speech to text
+STT (OpenAI Whisper-1)    ← transcribes Armenian speech → text
     │
     ▼
-LLM (GPT-4o-mini) ── generates Armenian response using bank data from system prompt
+LLM (GPT-4o-mini)         ← generates response using bank data + memory
     │
     ▼
-TTS (OpenAI TTS-1) ── converts text to natural speech
+Confidence Check          ← appends disclaimer if response is uncertain
     │
     ▼
-Audio Response to User
+TTS (GPT-4o-mini-tts)     ← converts response text → Armenian speech
+    │
+    ▼
+Agent Voice
 ```
 
 ### Component Breakdown
 
-**`agent.py`** — Main entrypoint. Initializes the AgentSession with STT/LLM/TTS/VAD, injects bank data into the system prompt, handles session lifecycle.
+| Component | Technology | Why |
+|-----------|-----------|-----|
+| **Voice framework** | LiveKit (open-source) | Required by project spec; handles real-time WebRTC audio, room management, and agent worker lifecycle — runs fully locally without cloud dependency |
+| **VAD** | Silero | Lightweight, accurate, runs locally — detects speech start/end without sending audio to an API |
+| **STT** | OpenAI Whisper-1 | Best-in-class Armenian language recognition; `language="hy"` parameter ensures Armenian-first transcription |
+| **LLM** | GPT-4o-mini | Fast, cost-efficient, and accurate enough for FAQ-style banking questions; `temperature=0.3` keeps answers stable and factual |
+| **TTS** | GPT-4o-mini-tts (voice: onyx) | Produces natural-sounding Armenian speech; `onyx` voice has a calm, professional tone suitable for a banking assistant |
+| **Memory** | Custom `ConversationMemory` | Keeps the last 10 messages in context so the agent remembers what was said earlier in the conversation |
 
-**`data_loader.py`** — Loads all bank JSON files and concatenates them into a single string passed directly to the LLM system prompt on every request.
+### Key Design Decisions
 
-**`scraper.py`** — Scrapes official bank websites using BeautifulSoup and saves data as JSON files per bank.
+**1. Local LiveKit server (not cloud)**
+The agent runs entirely on a local LiveKit server (`livekit-server --dev`). This avoids cloud dependency, keeps data local, and follows the open-source requirement of the project.
 
-**`utils/confidence.py`** — Detects if the LLM response contains uncertainty keywords and appends a disclaimer prompting the user to verify with the bank directly.
+**2. Bank data via web scraping**
+Bank information (loans, deposits, branches) is scraped from the real websites of Amio, Ameria, and Fast Bank using `scraper.py` and saved as JSON files. This data is injected directly into the LLM system prompt so the agent always answers based on real bank data rather than hallucinating.
 
-**`utils/language.py`** — Detects if the user spoke a non-Armenian language using character-set analysis, so the agent can respond appropriately.
+**3. Confidence checking**
+`utils/confidence.py` scans every LLM response for uncertainty keywords (`կարծում եմ`, `հավանաբար`, `probably`, etc.). If found, it appends a disclaimer telling the user to verify the information directly with the bank. This is critical for financial data.
 
-**`utils/memory.py`** — Maintains a rolling conversation history (last 10 turns) using LiveKit's ChatContext API.
+**4. Self-loop prevention**
+An `is_agent_speaking` flag prevents the agent from picking up its own TTS output as user input — a common problem in voice agents without proper acoustic echo cancellation.
 
-**`utils/metrics.py`** — Tracks per-turn and session-level latency metrics (STT, LLM, TTS durations).
+**5. Graceful shutdown & inactivity timeout**
+`utils/shutdown.py` runs a background monitor that ends the session if the user leaves the room or is inactive for 10 minutes, preventing orphaned agent processes.
 
-**`utils/shutdown.py`** — Handles graceful session shutdown with farewell messages. Monitors participant presence and enforces a 10-minute inactivity timeout.
+**6. Session metrics tracking**
+`utils/metrics.py` tracks STT, LLM, and TTS latency for every turn and logs a full session summary when the agent shuts down.
 
-**`utils/errors.py`** — Handles API errors (rate limits, timeouts, connection failures) with exponential backoff retry logic using `tenacity`.
+**7. Language detection module (built, not yet wired)**
+`utils/language.py` is built and capable of detecting Armenian, Russian, and English input by measuring the ratio of Armenian Unicode characters. It is ready to be wired into the session to block non-Armenian input in a future update.
 
----
-
-## Tech Stack & Model Choices
-
-| Component | Choice | Reason |
-|-----------|--------|--------|
-| **Framework** | LiveKit Agents (open-source) | Required by assignment; provides real-time audio pipeline, room management, VAD integration |
-| **STT** | OpenAI `whisper-1` | Best-in-class Armenian language support. Correctly transcribes Armenian even when mixed with Russian or English words. Reliable and cost-effective. |
-| **LLM** | OpenAI `gpt-4o-mini` (temp 0.3) | Fast response times critical for voice UX. Low temperature reduces hallucination and keeps answers grounded in bank data. Cost-effective for high query volumes. |
-| **TTS** | OpenAI `tts-1`, voice `alloy` | Natural-sounding synthesis. The `alloy` voice provides a professional, neutral tone appropriate for banking. `tts-1` is optimized for low latency. |
-| **VAD** | Silero VAD | Official recommendation for LiveKit Agents. Lightweight, runs on CPU without GPU. Accurately detects Armenian speech boundaries. |
-
-### Dependencies & Versions
-
-> Run `pip show <package>` in your virtual environment to get exact installed versions.
-
-```
-livekit-agents          # pip show livekit-agents
-livekit-plugins-openai  # pip show livekit-plugins-openai
-livekit-plugins-silero  # pip show livekit-plugins-silero
-python-dotenv           # pip show python-dotenv
-tenacity                # pip show tenacity
-requests                # pip show requests
-beautifulsoup4          # pip show beautifulsoup4
-torch                   # pip show torch
-openai                  # pip show openai
-```
-
-**Python:** 3.12.10  
-**Platform tested:** Windows 11
-
----
-
-## Data Strategy
-
-No vector database or embeddings are used. All bank data is loaded as a single concatenated string and injected directly into the LLM system prompt on every request.
-
-**Why this approach:**
-- Maximum context availability — the LLM always has complete bank data
-- Simple to update — re-run `scraper.py` to refresh data, no re-indexing required
-- Easy to evaluate and debug — the exact data sent to the LLM is always visible
-- Consistent behavior — no retrieval variability between calls
-
-**Data format injected into system prompt:**
-```
-=== Amio Bank ===
-
-[ՎԱՐԿԵՐ]
-<scraped loans page text>
-
-[ԱՎԱՆԴՆԵՐ]
-<scraped deposits page text>
-
-[ՄԱՍՆԱՃՅՈՒՂԵՐ]
-<scraped branches page text>
-```
+**8. Error handling module (built, not yet wired)**
+`utils/errors.py` is built with `tenacity` retry logic (3 attempts, exponential backoff) and Armenian-language error messages. It is ready to be connected to the session error handler in a future update.
 
 ---
 
@@ -134,22 +86,25 @@ No vector database or embeddings are used. All bank data is loaded as a single c
 
 ```
 armenian_bank_agent/
-├── agent.py                 # Main agent entrypoint
-├── data_loader.py           # Loads bank JSON data → system prompt string
-├── scraper.py               # Scrapes official bank websites → JSON files
-├── .env                     # Environment variables (not committed to repo)
-├── bank_data/               # Scraped bank data
+├── agent.py              # Main entry point — LiveKit worker + AgentSession pipeline
+├── scraper.py            # Scrapes bank websites → saves JSON to bank_data/
+├── data_loader.py        # Loads bank JSON and formats it for the LLM system prompt
+├── bank_data/            # Auto-generated folder with scraped bank data
 │   ├── amio.json
 │   ├── ameria.json
 │   └── fast.json
-└── utils/
-    ├── __init__.py
-    ├── confidence.py        # Uncertainty detection & disclaimer injection
-    ├── errors.py            # API error handling with retry logic
-    ├── language.py          # Armenian language detection
-    ├── memory.py            # Conversation history (rolling 10-turn window)
-    ├── metrics.py           # STT/LLM/TTS latency tracking
-    └── shutdown.py          # Graceful shutdown & inactivity monitoring
+├── utils/
+│   ├── __init__.py
+│   ├── memory.py         # Stores last 10 conversation messages for LLM context
+│   ├── confidence.py     # Detects uncertain responses and appends disclaimer ✅ active
+│   ├── language.py       # Detects Armenian / Russian / English 🔧 built, not yet wired
+│   ├── metrics.py        # Tracks STT / LLM / TTS latency per turn and session ✅ active
+│   ├── shutdown.py       # Graceful shutdown + 10-minute inactivity timeout ✅ active
+│   └── errors.py         # Retry logic + Armenian error messages 🔧 built, not yet wired
+├── .env                  # API keys — never commit to GitHub
+├── .gitignore
+├── requirements.txt
+└── README.md
 ```
 
 ---
@@ -158,136 +113,138 @@ armenian_bank_agent/
 
 ### Prerequisites
 
-- Python 3.11 or higher
-- OpenAI API key — [platform.openai.com](https://platform.openai.com)
-- LiveKit Cloud account (free tier) — [cloud.livekit.io](https://cloud.livekit.io)
-- LiveKit CLI binary (`lk` / `lk.exe`) — [github.com/livekit/livekit-cli/releases](https://github.com/livekit/livekit-cli/releases)
+- Python 3.10+
+- `livekit-server` binary ([download here](https://github.com/livekit/livekit/releases))
+- `lk` CLI binary ([download here](https://github.com/livekit/livekit-cli/releases))
+- An OpenAI API key ([get one here](https://platform.openai.com/api-keys))
 
-### Step 1 — Clone the repository
+### 1. Clone the repo
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/your-username/armenian_bank_agent.git
 cd armenian_bank_agent
 ```
 
-### Step 2 — Create virtual environment
+### 2. Create and activate virtual environment
 
 ```bash
 python -m venv venv
 
 # Windows
-venv\Scripts\activate
+.\venv\Scripts\Activate.ps1
 
-# macOS / Linux
+# Mac / Linux
 source venv/bin/activate
 ```
 
-### Step 3 — Install dependencies
+### 3. Install dependencies
 
 ```bash
-pip install livekit-agents livekit-plugins-openai livekit-plugins-silero \
-            python-dotenv tenacity requests beautifulsoup4 torch
+pip install -r requirements.txt
 ```
 
-### Step 4 — Configure environment variables
+Or manually:
+
+```bash
+pip install livekit-agents livekit-plugins-openai livekit-plugins-silero
+pip install requests beautifulsoup4 python-dotenv tenacity
+```
+
+### 4. Configure .env
 
 Create a `.env` file in the project root:
 
 ```env
-LIVEKIT_URL=wss://your-project.livekit.cloud
-LIVEKIT_API_KEY=your_livekit_api_key
-LIVEKIT_API_SECRET=your_livekit_api_secret
-OPENAI_API_KEY=your_openai_api_key
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+OPENAI_API_KEY=sk-...your_key_here...
 ```
 
-LiveKit credentials: [cloud.livekit.io](https://cloud.livekit.io) → your project → Settings → Keys.
+### 5. Scrape bank data
 
-### Step 5 — Scrape bank data
+Run this once to generate the `bank_data/` folder:
 
 ```bash
 python scraper.py
 ```
 
-This creates `bank_data/amio.json`, `bank_data/ameria.json`, `bank_data/fast.json` with loans, deposits, and branch data scraped from official bank websites.
+This creates `amio.json`, `ameria.json`, and `fast.json` with loans, deposits, and branch data scraped from each bank's website.
 
 ---
 
-## Running the Agent
+## How to Run
+
+Start each of the following in a **separate terminal**, in this order:
+
+### Terminal 1 — Start LiveKit server
+
+```bash
+# Windows
+.\livekit-server.exe --dev
+
+# Mac / Linux
+livekit-server --dev
+```
+
+Wait until you see `starting LiveKit server`.
+
+### Terminal 2 — Start the agent
 
 ```bash
 python agent.py dev
 ```
 
-The agent connects to LiveKit Cloud and registers as a worker named `armenian-bank-agent`.
-
-Expected output:
+Wait until you see:
 ```
-INFO  livekit.agents  starting worker
-INFO  livekit.agents  registered worker {"agent_name": "armenian-bank-agent", "url": "wss://..."}
+registered worker {"agent_name": "armenian-bank-agent", "url": "ws://localhost:7880"}
 ```
 
----
-
-## Testing
-
-### Option A — LiveKit Agents Playground
-
-1. Open [agents-playground.livekit.io](https://agents-playground.livekit.io)
-2. Sign in with your LiveKit Cloud account
-3. Select your project and connect to room `test-room`
-4. The agent joins automatically and greets you in Armenian
-
-### Option B — LiveKit CLI dispatch
-
-In a separate terminal while the agent is running:
+### Terminal 3 — Generate a join token
 
 ```bash
-lk dispatch create \
-  --url wss://your-project.livekit.cloud \
-  --api-key YOUR_API_KEY \
-  --api-secret YOUR_API_SECRET \
-  --room test-room \
-  --agent-name armenian-bank-agent
+# Windows
+.\lk.exe token create --api-key devkey --api-secret secret --join --room test-room --identity user1
+
+# Mac / Linux
+./lk token create --api-key devkey --api-secret secret --join --room test-room --identity user1
 ```
 
-### Sample queries
+Copy the token from the output.
 
-```
-Amio բանկի վարկերի տոկոսադրույքները որքան են?
-Ameriabank-ի մասնաճյուղերը որտե՞ղ են:
-Fast Bank-ում ավանդ կարո՞ղ եմ բացել:
-Ի՞նչ կարող ես ինձ ասել Fast Bank-ի ավանդների մասին:
-```
+### Browser — Join the room
 
-The agent will **refuse** questions outside its scope:
-```
-— Ո՞ր ռեստորաններն են մոտ բանկին:
-✓ Կներեք, ես կարող եմ օգնել միայն վարկերի, ավանդների և մասնաճյուղերի վերաբերյալ հարցերով։
+1. Go to [https://agents-playground.livekit.io](https://agents-playground.livekit.io)
+2. Click **Manual**
+3. Enter:
+   - **URL:** `ws://localhost:7880`
+   - **Token:** *(paste token from Terminal 3)*
+4. Click **Connect** and allow microphone access
+
+### Terminal 4 — Dispatch the agent
+
+```bash
+# Windows
+.\lk.exe dispatch create --url ws://localhost:7880 --api-key devkey --api-secret secret --room test-room --agent-name armenian-bank-agent
+
+# Mac / Linux
+./lk dispatch create --url ws://localhost:7880 --api-key devkey --api-secret secret --room test-room --agent-name armenian-bank-agent
 ```
 
 ---
 
-## Scalability
+## How to Use
 
-Adding a new bank requires only two changes:
+Once connected, the agent greets you in Armenian:
 
-**1. `data_loader.py`** — add the bank to `BANK_NAMES`:
-```python
-BANK_NAMES = {
-    "amio":    "Amio Bank",
-    "ameria":  "Ameriabank",
-    "fast":    "Fast Bank",
-    "newbank": "New Bank Name",   # ← add here
-}
-```
+> *"Բարև։ Ես Արամն եմ։ Ձեր բանկային օгнаканը։ Ինчо՞в карող ем огнел։"*
 
-**2. `scraper.py`** — add the bank's URLs to `BANKS`:
-```python
-"newbank": {
-    "loans":    "https://www.newbank.am/loans",
-    "deposits": "https://www.newbank.am/deposits",
-    "branches": "https://www.newbank.am/branches"
-}
-```
+You can ask questions in Armenian about:
 
-Then re-run `python scraper.py` — no other changes needed.
+| Topic | Armenian | Example question |
+|-------|----------|-----------------|
+| Loans | Վарկер | «Амио банки варкери токосадрույцнере канի՞ токос ен։» |
+| Deposits | Аванднер | «Америа банкум аванди токоснере ի՞нч ен։» |
+| Branches | Маснаճыуղер | «Фасть банкի маснаճыуղерը орте՞ղ ен гтнвум։» |
+
+The agent will politely decline any question outside these three topics.

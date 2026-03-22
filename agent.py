@@ -19,7 +19,6 @@ LIVEKIT_URL = os.getenv("LIVEKIT_URL")
 
 import asyncio                # For async operations (real-time voice handling)
 import logging                # For printing logs (debugging, monitoring)
-from dotenv import load_dotenv  # Loads environment variables from .env
 
 # LiveKit core classes
 from livekit.agents import (
@@ -46,7 +45,6 @@ from utils.shutdown import monitor_participant
 # ENVIRONMENT + LOGGING SETUP
 # ================================================================
 
-load_dotenv()  # Load API keys (like OpenAI key) from .env file
 
 # Configure logging format
 logging.basicConfig(
@@ -95,12 +93,7 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"Միանում ենք room-ին: {ctx.room.name}")
 
     # Connect to LiveKit room (audio only)
-    await ctx.connect(
-    url=LIVEKIT_URL,                # URL from your .env
-    api_key=LIVEKIT_API_KEY,        # your key
-    api_secret=LIVEKIT_API_SECRET,  # your secret
-    auto_subscribe=AutoSubscribe.AUDIO_ONLY
-    )
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     # Wait until a user joins
     participant = await ctx.wait_for_participant()
@@ -201,20 +194,9 @@ async def entrypoint(ctx: JobContext):
     # METRICS EVENT (PERFORMANCE TRACKING)
     # ============================================================
 
-    @session.on("metrics_collected")
+    @session.on("session_usage_updated")
     def on_metrics(event):
-        m = event.metrics
-
-        # Create structured metrics object
-        turn = TurnMetrics(
-            stt_duration=getattr(m, "stt_duration", 0.0),
-            llm_duration=getattr(m, "llm_duration", 0.0),
-            tts_duration=getattr(m, "tts_duration", 0.0),
-            total_duration=getattr(m, "total_duration", 0.0),
-        )
-
-        # Save metrics
-        metrics.add_turn(turn)
+        pass
 
 
     # ============================================================
